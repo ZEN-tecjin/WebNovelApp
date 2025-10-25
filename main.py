@@ -1,49 +1,19 @@
 
 from scraper import download_novel
-from reader import read_chapter
+from reader import read_chapter, search_text, tts_read, _save_progress
 import PySimpleGUI as sg
-from storage import list_chapters
+from ui import main_menu, download_window, reader_window, reader_list_window
 from storage import init_db
+from pathlib import Path
 
 init_db()
-
-
-def main_menu():
-    """Main menu function"""
-    sg.theme("DarkBlue14")
-    layout = [
-        [sg.Text("📚 WebNovelApp - Main Menu", font=("Helvetica", 16), justification="center")],
-        [sg.Button("Download Novel", key="1", size=(25, 1))],
-        [sg.Button("Read Saved Chapter", key="2", size=(25, 1))],
-        [sg.Button("Quit", key="3", size=(25, 1))],
-    ]
-    return sg.Window("WebNovelApp", layout, element_justification="center", finalize=True)
-
-
-def download_window():
-    """Main window function"""
-    layout = [
-        [sg.Text("Enter Novel URL: ")],
-        [sg.Input(key="-URL-", size=(50, 1))],
-        [sg.Button("Download"), sg.Button("Back")]
-    ]
-    return sg.Window("Download Novel", layout, finalize=True)
-
-
-def reader_window():
-    """Window for choosing which chapter to read"""
-    chapters = list_chapters()
-    layout = [
-        [sg.Text("Select Chapter: ")],
-        [sg.Listbox(chapters, size=(60, 15), key="-CHAPTER-", enable_events=True)],
-        [sg.Button("Open"), sg.Button("Back")]
-    ]
-    return sg.Window("Read Chapters", layout, finalize=True)
 
 
 def run_app():
     """Main event loop controlling window function"""
     window = main_menu()
+
+
 
     while True:
         event, values = window.read()
@@ -72,8 +42,8 @@ def run_app():
                     sg.popup("Download Complete!", title="Done")
 
         if event == "Read Saved Chapter":
-            window.closed()
-            window = reader_window()
+            window.close()
+            window = reader_list_window()
             while True:
                 event, values = window.read()
                 if event in (sg.WINDOW_CLOSED, "Back"):
@@ -81,7 +51,7 @@ def run_app():
                     window = main_menu()
                     break
                 if event == "Open":
-                    selected = values["-CHAPTER"]
+                    selected = values["-CHAPTER-"]
                     if not selected:
                         sg.popup("Select a chapter to open")
                         continue
@@ -92,7 +62,48 @@ def run_app():
                         title="chapter reader",
                         size=(70, 30)
                     )
-                    window = reader_window()
+                    window = reader_list_window()
+        if event == "Open":
+            selected = values["-CHAPTER-"]
+            if not selected:
+                sg.popup("Select a chapter to open")
+                continue
+
+            chapter_path = selected[0]
+            chapter_name = Path(chapter_path).name
+            text = read_chapter(chapter_path, return_text=True)
+
+            window.close()
+            window = reader_window(text, chapter_name)
+
+            while True:
+                event, values = window.read()
+                if event in (sg.WINDOW_CLOSED, "⬅ Back"):
+                    window.close()
+                    window = reader_list_window()
+                    break
+
+                if event == "Search":
+                    keyword = values["-SEARCH-"].strip()
+                    if not keyword:
+                        sg.popup("Please enter a search term")
+                        continue
+                    results = search_text(chapter_path, keyword)
+                    if results:
+                        found_lines = "\n".join([f"[{n}] {t}" for n, t in results[:10]])
+                        sg.popup_scrolled("\n".join(found_lines, title = f"Results for '{keyword}'"))
+
+                if event == "🔊 TTS":
+                    tts_read(values["-TEXT-"])
+
+
+                if event == "💾 Save Bookmark":
+                    lines = values ["-TEXT-"].split("\n")
+                    _save_progress(chapter_path, len(lines))
+                    sg.popup("Bookmark saved successfully!")
+
+
+
     window.close()
 
 
