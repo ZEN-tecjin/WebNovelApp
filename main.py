@@ -36,6 +36,9 @@ def run_app():
                     url = values["-URL-"].strip()
                     if not url:
                         sg.popup("Please enter a valid URL")
+                        download_novel(url, window=window)
+                        window["-STATUS-"].update("✅ Download Complete!")
+                        window["-PROGRESS-"].update(100)
                         continue
                     sg.popup("Starting download...", title="Download")
                     download_novel(url)
