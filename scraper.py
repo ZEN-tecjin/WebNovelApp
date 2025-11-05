@@ -1,11 +1,9 @@
-# scraper.py (fixed & improved)
-import os
-import time
+
 import random
 import re
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
-from requests_html import HTMLSession
+from storage import make_novel_folder, save_chapter
 from playwright.sync_api import sync_playwright
 
 # ---------- helpers ----------
@@ -21,6 +19,7 @@ def _safe_requests_get(url, headers=None, timeout=15):
             "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
             "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:109.0) "
             "Gecko/20100101 Firefox/117.0",
+
         ]),
         "Accept-Language": "en-US,en;q=0.9",
         "Referer": url,
@@ -48,10 +47,12 @@ def _render_js_page(url):
                               "Chrome/118.0 Safari/537.36"
             })
             print(f"[Playwright] Rendering {url} ...")
-            page.goto(url, timeout=30000)
-            page.wait_for_timeout(5000)  # wait 5s for JS to load
-            html = page.content()
-            browser.close()
+            try:
+                page.goto(url, timeout=30000)
+                page.wait_for_selector("#chr-content", timeout=10000)
+            except Exception:
+                page.wait_for_timeout(5000)
+
     except Exception as e:
         print(f"⚠️ Playwright failed to render {url}: {e}")
     return html
@@ -76,81 +77,75 @@ def _save_debug_html(novel_folder, idx, html):
 
 # ---------- main function ----------
 
-def download_novel(url, max_chapters=20, render_js=False):
-    """High-level: find chapter links from index page, then download each chapter."""
-    print(f"Starting download for: {url}")
+def download_chapters(chapter_pairs, novel_title=None, base_folder=None, render_js=False, window=None):
+    """
+    Download a list of (chapter_title, chapter_url).
+    If novel_title or base_folder not provided, guess from the first chapter page.
+    Saves both cleaned HTML and extracted text (txt).
+    """
 
-    domain = urlparse(url).netloc.lower()
-    chapters = None
-    resp = _safe_requests_get(url)
-    if not resp:
-        print("❌ Failed to get novel index page.")
+
+    if not chapter_pairs:
+        print("No chapters to download.")
         return
 
-    soup_index = _get_soup(resp.text)
-    if soup_index is None:
-        print("❌ Failed to parse main page HTML.")
-        return
-    if "novelight" in domain:
-        chapters = adapter_novellight(soup_index, url)
-    if not chapters:
-        chapters = get_chapter_links(soup_index, url)
+    # If novel_title not provided, try to guess from the first chapter page
+    first_title, first_url = chapter_pairs[0]
+    if base_folder is None:
+        # attempt to fetch index/title from first_url's parent
+        resp = _safe_requests_get(first_url)
+        if resp:
+            soup = _get_soup(resp.text)
+            novel_title = novel_title or _guess_title(soup, first_url)
+        else:
+            novel_title = novel_title or "novel"
+        base_folder = make_novel_folder(novel_title)
 
+    total = len(chapter_pairs)
+    print(f"📘 {novel_title} — downloading {total} chapters")
 
+    for idx, (chap_title, chap_url) in enumerate(chapter_pairs, start=1):
+        status_msg = f"Downloading chapter {idx}/{total} - {chap_title}"
+        print(status_msg)
+        if window:
+            window["-STATUS-"].update(status_msg)
+            window["-PROGRESS-"].update(int(idx / total * 100))
+            window.refresh()
 
-    # Use the robust TOC extractor
-    chapters = get_chapter_links(soup_index, url)
-    if not chapters:
-        print("⚠️ No chapters found — treating as single-page novel.")
-        chapters = [url]
-
-    # Prepare saving
-    from storage import save_chapter, make_novel_folder
-    novel_title = _guess_title(soup_index, url)
-    base_folder = make_novel_folder(novel_title)
-    print(f"📘 Detected novel title: {novel_title}")
-    print(f"📁 Saving chapters in: {base_folder}")
-
-    # download loop
-    for idx, chap_url in enumerate(chapters, start=1):
-        print(f"\n🔹 Fetching chapter {idx}: {chap_url}")
-        time.sleep(2)  # polite delay
-
-        # 1) Try fast GET
         r = _safe_requests_get(chap_url)
         html = r.text if r else ""
-
-        # 2) If html looks incomplete, try JS render
-        if not html or len(html) < 400 or any(k in html.lower() for k in ("loading", "subscribe", "table of contents")):
-            print(" -> page looks incomplete, trying JS renderer...")
+        # decide whether to render JS
+        if render_js or (not html or "loading" in html.lower() or "comment" in html.lower()):
             html = _render_js_page(chap_url)
 
         if not html:
-            print(" -> failed to get HTML for", chap_url)
-            _save_debug_html(base_folder, idx, html)
+            print(f"No html for {chap_url}")
             continue
+
 
         s = _get_soup(html)
         if not s:
-            print(" -> BeautifulSoup failed to parse HTML; saving debug copy.")
-            _save_debug_html(base_folder, idx, html)
             continue
 
-        # extract and save
-        content = _extract_text_from_soup(s)
-        if not content or len(content) < 100:
-            print(" -> extracted content is small; saving raw HTML for inspection.")
-            _save_debug_html(base_folder, idx, html)
-            # still attempt to save a stub so user can see file exists
-        chap_title = _guess_chapter_title(s) or f"Chapter_{idx}"
-        try:
-            save_chapter(base_folder, chap_title, content)
-            print(f"✅ Saved: {chap_title}")
-        except Exception as e:
-            print(f"❌ Save failed for {chap_url}: {e}")
-            _save_debug_html(base_folder, idx, html)
+        content_text = _extract_text_from_soup(s) or ""
+        if not content_text.strip():
+            print(f"Empty chapter body for {chap_title}")
+            continue
 
+        content_text = _extract_text_from_soup(s) or ""
+        cleaned_html_str = _clean_html_for_save(_get_soup(html))
 
+        # Save: html and text
+        save_chapter(base_folder, chap_title, cleaned_html_str, source_url=chap_url, fmt="html")
+        save_chapter(base_folder, chap_title, content_text, source_url=chap_url, fmt="txt")
+
+        # optional: save raw html for debugging (keeps original)
+        _save_debug_html(base_folder, idx, html)
+
+    if window:
+        window["-STATUS-"].update(f"✅ Finished downloading {total} chapters!")
+        window["-PROGRESS-"].update(100)
+        window.refresh()
 # ---------- parsing helpers ----------
 
 def _guess_title(soup, url):
@@ -168,43 +163,42 @@ def _guess_chapter_title(soup):
             return el.get_text().strip()
     return None
 
+def _clean_html_for_save(soup):
+    if soup is None:
+        return ""
+    for tag in soup(["script", "style", "noscript", "iframe"]):
+        tag.decompose()
+    return str(soup)
+
+
+
 def _extract_text_from_soup(soup):
-    candidates = []
+    main = soup.find("div", id = "chr-content")
+    if main:
+        for t in main(["script", "style","noscript", "aside"]):
+            t.decompose()
+        paragraphs = main.find_all(["p"])
+        if paragraphs:
+            text = "\n\n".join(p.get_text().strip() for p in paragraphs if p.get_text().strip())
+            return text.strip()
+
     for hint in (
-        "chapter-content", "chapter-body", "entry-content",
-        "post-content", "reading-content", "text-left", "reader-content", "chapterText", "novel-body"
+         "chapter-content", "chapter-body", "entry-content",
+        "post-content", "reading-content", "reader-content", "chaptertext", "novel-body"
     ):
-        candidates.extend(soup.find_all(attrs={"class": lambda v: v and hint in v.lower()}))
-        candidates.extend(soup.find_all(attrs={"id": lambda v: v and hint in v.lower()}))
+        block = soup.find(attrs ={"class": lambda v: v and hint in v.lower()})
+        if block:
+            text = block.get_text(seperator = "\n").strip()
+            if text:
+                return text
 
-    if not candidates:
-        for div in soup.find_all("div"):
-            text = div.get_text(separator="\n").strip()
-            if len(text.split()) > 100:
-                candidates.append(div)
-
-    best_block = ""
-    for el in candidates:
-        text = el.get_text(separator="\n").strip()
-        if len(text) > len(best_block):
-            best_block = text
-
-    if best_block:
-        cleaned = []
-        for line in best_block.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            if any(x in line.lower() for x in ["support us", "bookmark", "previous", "next", "table of contents", "loading"]):
-                continue
-            cleaned.append(line)
-        return "\n\n".join(cleaned)
-
-    paragraphs = soup.find_all("p")
-    if paragraphs:
-        return "\n\n".join(p.get_text().strip() for p in paragraphs if len(p.get_text().strip()) > 20)
-
-    return soup.get_text(separator="\n").strip()
+    divs = soup.find_all("div")
+    longest = ""
+    for d in divs:
+        t = d.get_text(separator ="\n").strip()
+        if len(t) > len(longest):
+            longest = t
+    return longest.strip()
 
 # CHAPTER TOC HINTS & extractor
 
@@ -214,33 +208,97 @@ CHAPTER_HINTS = (
     "chapter__list", "list-chapters", "chapter-row"
 )
 
-def get_chapter_links(soup, base_url):
-    """Return an ordered list of chapter URLs (best effort)."""
-    links = []
+def get_chapter_list(url, render_js=False):
+    """
+    Given a novel index/TOC url, return a list of (chapter_title, chapter_url)
+    in chronological order (chapter 1 first).
+    Best-effort extraction: site-specific (novelight) first, fallback to heuristics.
+    """
+    resp = _safe_requests_get(url)
+    if not resp:
+        print(f"Failed to fetch TOC: {url}")
+        return []
 
-    # 1) Try containers with common class/id hints
+    soup = _get_soup(resp.text)
+    if not soup:
+        return []
+
+    domain = urlparse(url).netloc.lower()
+    pairs = []
+
+    # site-specific: NovelLight's TOC often contains anchor text with chapter titles
+    if "novelight" in domain:
+        toc = soup.select_one("div.chapter-list") or soup.select_one("div.list-chapter")
+        if toc:
+            anchors = toc.select("a[href]")
+            # anchors are typically newest->oldest on the site, so reverse to get chronological
+            anchors = list(reversed(anchors))
+            for a in anchors:
+                href = a.get("href")
+                if not href:
+                    continue
+                title = (a.get_text() or "").strip() or None
+                pairs.append((title or href.split("/")[-1], urljoin(url, href)))
+            return pairs
+
+    # Generic fallback: try to obtain anchors by hints from get_chapter_links
+    # Find containers matching CHAPTER_HINTS and extract (text, href)
     for hint in CHAPTER_HINTS:
         containers = soup.find_all(attrs={"class": lambda v: v and hint in v.lower()})
         containers += soup.find_all(attrs={"id": lambda v: v and hint in v.lower()})
-        for c in containers:
-            for a in c.find_all("a", href=True):
-                links.append(urljoin(base_url, a["href"]))
-        if links:
-            return _dedupe_preserve_order(links)
+        if containers:
+            links = []
+            for c in containers:
+                for a in c.find_all("a", href=True):
+                    title = (a.get_text() or "").strip()
+                    href = urljoin(url, a["href"])
+                    links.append((title or href.split("/")[-1], href))
+            if links:
+                # preserve order from page, but try to sort numerically when we can
+                # attempt to sort by number if present in href (chapterX)
+                def num_key(pair):
+                    u = pair[1]
+                    m = re.search(r"(?:chapter[-_/ ]?)(\d+)", u, re.I)
+                    if m:
+                        return int(m.group(1))
+                    m2 = re.findall(r"(\d+)", u)
+                    if m2:
+                        return int(m2[-1])
+                    return 0
+                try:
+                    return sorted(links, key=num_key)
+                except Exception:
+                    return links
 
-    # 2) Fallback: heuristics across all anchors
-    candidate = []
+    # Last resort: gather anchors across whole page that look like chapter links
+    anchors = []
     for a in soup.find_all("a", href=True):
         href = a["href"].strip()
         text = (a.get_text() or "").strip()
-        abs_url = urljoin(base_url, href)
+        abs_url = urljoin(url, href)
         if re.search(r"/chapter[s]?/|chapter[-_]?\d+", href, re.I) or "chapter" in text.lower():
-            candidate.append(abs_url)
+            anchors.append((text or abs_url.split("/")[-1], abs_url))
         else:
             if re.search(r"/\d{1,6}(/)?$", href):
-                candidate.append(abs_url)
-
-    return _dedupe_and_sort_chapter_urls(candidate)
+                anchors.append((text or abs_url.split("/")[-1], abs_url))
+    # dedupe preserve order
+    out = []
+    seen = set()
+    for t,u in anchors:
+        if u not in seen:
+            seen.add(u)
+            out.append((t or u.split("/")[-1], u))
+    # try sorting numerically if possible
+    def fallback_key(pair):
+        u = pair[1]
+        m2 = re.findall(r"(\d+)", u)
+        if m2:
+            return int(m2[-1])
+        return 0
+    try:
+        return sorted(out, key=fallback_key)
+    except:
+        return out
 
 def _dedupe_preserve_order(seq):
     seen = set()
@@ -251,10 +309,12 @@ def _dedupe_preserve_order(seq):
             out.append(u)
     return out
 
+
+
 def _dedupe_and_sort_chapter_urls(urls):
     urls = _dedupe_preserve_order(urls)
     def keyfn(u):
-        m = re.search(r"(?:chapter[-_/]?)(\d+)", u, re.I)
+        m = re.search(r"chapter[-_/]*(\d+)", u, re.I)
         if m:
             return int(m.group(1))
         m2 = re.findall(r"(\d+)", u)
@@ -263,7 +323,8 @@ def _dedupe_and_sort_chapter_urls(urls):
         return u
     try:
         return sorted(urls, key=keyfn)
-    except Exception:
+    except Exception as e:
+        print(f"Sorting failed: {e}")
         return urls
 
 # Example adapter placeholder (fill selector after inspecting site)
@@ -275,4 +336,9 @@ def adapter_novellight(soup, base_url):
     if not toc:
         return None
     links = [urljoin(base_url, a["href"]) for a in toc.select("a[href]")]
-    return _dedupe_and_sort_chapter_urls(links)
+
+    links = _dedupe_and_sort_chapter_urls(links)
+
+    links.reverse()
+
+    return links
