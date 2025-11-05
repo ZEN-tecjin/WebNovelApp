@@ -1,4 +1,4 @@
-# ui.py - GUI menu using PySimpleGUI
+
 import PySimpleGUI as sg
 from storage import list_chapters
 
@@ -15,15 +15,29 @@ def main_menu():
 
 
 def download_window():
-    """Download screen"""
     layout = [
         [sg.Text("Enter Novel URL: ")],
-        [sg.Input(key="-URL-", size=(50, 1))],
-        [sg.Button("Download"), sg.Button("Back")],
-        [sg.Text("", key='-STATUS-', size=(50, 1), text_color="yellow")]
+        [sg.Input(key="-URL-", size=(60, 1)), sg.Button("Preview", key="Preview")],
+        [sg.Text("Preview will fetch TOC and show available chapters.")],
+        [sg.Text("Status:", size=(10, 1)), sg.Text("", key="-STATUS-", size=(40, 1), text_color="yellow")],
+        [sg.ProgressBar(100, orientation="h", key="-PROGRESS-", size=(40, 20))],
+        [sg.Button("Back")]
     ]
     return sg.Window("Download Novel", layout, finalize=True)
 
+def preview_window(chapters):
+    """
+    chapters: list of (title, url) tuples
+    """
+    display = [f"{i+1:04d} — {t or 'untitled'}" for i, (t, u) in enumerate(chapters)]
+    layout = [
+        [sg.Text("Preview TOC (select chapters / range)")],
+        [sg.Listbox(values=display, size=(80, 20), key="-PREVIEW_LIST-", select_mode=sg.LISTBOX_SELECT_MODE_EXTENDED)],
+        [sg.Text("OR specify range: Start"), sg.Input(key="-START-", size=(5,1)),
+         sg.Text("End"), sg.Input(key="-END-", size=(5,1))],
+        [sg.Button("Download Selected", key="Download Selected"), sg.Button("Cancel")]
+    ]
+    return sg.Window("Preview Chapters", layout, finalize=True)
 
 def reader_list_window():
     """Window to select which chapter to read."""
